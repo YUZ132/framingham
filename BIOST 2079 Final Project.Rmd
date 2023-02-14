@@ -1,0 +1,582 @@
+---
+title: "BIOST 2079 Final Project"
+author: "Nick, Yufeng, Alexander, Jamal"
+date: "2022-12-12"
+output: html_document
+rmdformats::material:
+    code_folding: hide
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = 1) 
+```
+
+## Introduction
+
+### Background
+
+The World Health Organization (WHO) estimates that 12 million deaths occur across the world every year due to heart diseases. In fact, half of deaths in the United States and other developed countries are due to cardiovascular diseases. Early identification of risk for cardiovascular disease can allow high risk individuals to make lifestyle changes in order to reduce the chance of developing complications. The purpose of this project was to use the well-known framingham.csv dataset to identify relevant risk factors for heart disease, as well as predict overall risk using a variety of classification methods.
+
+### Data Source
+
+Our dataset is from an ongoing cardiovascular study on residents of the town of Framingham, Massachusetts. The dataset includes a range of predictors (demographic, behavioral, medical history, etc.), as well as a binary outcome variable for the 10-year risk of coronary heart disease (CHD). It includes over 4,000 records and 15 attributes. The variables in the data are summarized below:
+
+Demographic:
+- Sex: male or female (nominal)
+- Age: Age of the patient (continuous)
+
+Behavioral:
+- Current Smoker: whether or not the patient is a current smoker (nominal)
+- Cigs Per Day: the number of cigarettes that the person smoked on average in one day (continuous)
+
+Medical History
+- BP Meds: whether or not the patient was on blood pressure medication (nominal)
+- Prevalent Stroke: whether or not the patient had previously had a stroke (nominal)
+- Prevalent Hyp: whether or not the patient was hypertensive (nominal)
+- Diabetes: whether or not the patient had diabetes (nominal)
+
+Clinical Variables
+- Tot Chol: total cholesterol level (continuous)
+- Sys BP: systolic blood pressure (continuous)
+- Dia BP: diastolic blood pressure (continuous)
+- BMI: Body Mass Index (continuous)
+- Heart Rate: heart rate (continuous)
+- Glucose: glucose level (continuous)
+
+Outcome Variable
+- 10 year risk of coronary heart disease CHD (binary: 1 = yes, 0 = no)
+
+Reference - https://www.kaggle.com/datasets/dileep070/heart-disease-prediction-using-logistic-regression 
+
+## Package and Data Loading
+
+```{r package loading}
+
+library(dplyr)
+library(ggplot2)
+library(pROC)
+library(MASS) # lda, qda
+library(caret)
+library(corrplot)
+library(randomForest)
+
+```
+
+```{r data}
+
+data <- read.csv("framingham.csv")
+summary(data)
+head(data)
+
+```
+
+## Data Preprocessing
+
+First, let's take a look at the missing counts for each variable.
+
+```{r NA Count by Column}
+
+Na <- (sapply(data, function(x) (sum(is.na(x))/nrow(data))*100)) # calculates the number of missing data for each variable divided by the total number of rows or cases.
+
+Percent_Missing <- Na[order(-Na)] # orders the NA percentages in descending order
+head(data.frame(Percent_Missing),10) #displays the first 10 variables.
+
+```
+
+Since we don't have that many missing values, we can simply remove observations with missing values for any variable.
+
+```{r Remove Missing Values}
+
+data <- na.omit(data)
+
+```
+
+From our inspection of the data, we can also see that many of our variables are of the incorrect data type. Let's fix this...
+
+```{r Fixing Datatypes}
+
+factor_variables <- c('male', 'education', 'currentSmoker', 'BPMeds', 'prevalentStroke', 'prevalentHyp', 'diabetes', 'TenYearCHD')
+
+for(column in factor_variables){
+  data[, column] <- as.factor(data[, column])
+}
+
+head(data)
+
+```
+
+## Principal Component Analysis (PCA)
+
+First, let's perform PCA on the continuous predictors. We will keep two separate datasets - one with the PCA data, and one with the original data.
+
+```{r PCA}
+
+## subset data to pca
+pca_var <- c('age', 'cigsPerDay', 'totChol', 'sysBP', 'diaBP', 'BMI', 'heartRate', 'glucose')
+pca_var_index <- which(colnames(data) %in% pca_var)
+pca_data_untransformed <- data[, pca_var_index]
+other_data <- data[, -pca_var_index]
+
+## perform pca
+pca_results <- prcomp(pca_data_untransformed, center = TRUE, scale = TRUE)
+pca_data_transformed <- pca_results$x[, c(1, 2)]
+
+pca_data <- cbind(pca_data_transformed, other_data)
+
+```
+
+## Exploratory Data Analysis
+
+Now, we will examine some of the relationships in the data through visualization. First, let's make a plot of the first two principal components from PCA.
+
+```{r pca plot}
+
+pca_data %>% 
+  ggplot() + 
+  geom_point(aes(x = PC1, y = PC2, color = TenYearCHD))
+
+```
+
+The first two principal components don't appear to reveal any information about the outcome (i.e., there aren't distinct clusters of either outcome).
+
+## Model Fitting
+
+In this section, we will fit multiple models and compare them via test set accuracy and AUC.
+
+First, let's divide the data into training and testing sets. We will use an 60:40 split (train:test).
+
+```{r train test split}
+
+## set seed for reproducibility
+set.seed(15213)
+
+## generate samples
+sub_sample <- sample(nrow(data), size = nrow(data)*0.60)
+
+## divide data
+train <- data[sub_sample, ]
+test <- data[-sub_sample, ]
+
+```
+
+Let's take a closer look at the distribution of the outcome across the splits.
+
+```{r train outcome distribution}
+
+summary(train$TenYearCHD)
+
+```
+
+```{r test outcome distribution}
+
+summary(test$TenYearCHD)
+
+```
+
+### Logistic Regression
+
+Now, let's fit a series of logistic regression models. We will consider models for all additive inputs, different combinations of interactions, and subset versions containing only the important features. 
+
+All additive inputs:
+
+```{r mod1: all additive inputs}
+
+mod1 <- glm(formula = TenYearCHD ~ ., family = 'binomial', data = train)
+
+```
+
+Additive inputs subset to significant predictors:
+
+```{r original_mod1: significant additive inputs}
+
+mod2 <- glm(formula = TenYearCHD ~ male + age + cigsPerDay + totChol + sysBP + glucose, family = 'binomial', data = train)
+
+```
+
+All pair-wise interactions:
+
+```{r mod3: All interactions}
+
+mod3 <- glm(formula = TenYearCHD ~ . * ., family = 'binomial', data = train)
+
+```
+
+All pair-wise interactions on significant features:
+
+```{r mod4: Interactions using only significant features}
+
+mod4 <- glm(formula = TenYearCHD ~ (male + age + cigsPerDay + totChol + sysBP + glucose) * 
+              (male + age + cigsPerDay + totChol + sysBP + glucose), family = 'binomial', data = train)
+
+```
+
+Manually selected interactions:
+
+```{r mod5: Manually selected interactions}
+
+mod5 <- glm(formula = TenYearCHD ~ male * (education + prevalentHyp) + education * (currentSmoker + totChol) + cigsPerDay + (sysBP + diaBP) + heartRate * (diabetes + glucose + sysBP) + age, family = 'binomial', data = train)
+
+```
+
+### Machine Learning Techniques: K-Nearest Neighbors (KNN) and Random Forest (RF)
+
+In this section, we will fit a few models using various machine learning techniques (KNN and RF).
+
+First, we need to prepare our data for model fitting using caret. 
+
+```{r outcome levels for KNN}
+
+levels(train$TenYearCHD) <- c("neg", "pos")
+levels(test$TenYearCHD) <- c("neg", "pos")
+
+```
+
+```{r defining training and testing sets for KNN}
+
+y.train <- train$TenYearCHD
+y.test <- test$TenYearCHD
+x.train <- train[,c(1:15)]
+x.test <- test[,c(1:15)]
+
+```
+
+Next, define our modeling approach
+
+```{r KNN ctrl}
+
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 1,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+```
+
+And finally, fit each model.
+
+```{r fitting KNN model}
+
+## set seed for reproducibility
+set.seed(1)
+
+## manually define tuning parameter grid
+knn.grid <- data.frame(k = seq(1,200,by=5))
+
+## fit KNN model
+mod6 <- train(x = x.train,
+              y = y.train,
+              method = "knn",
+              preProcess = c("center","scale"), # based on the distance, so center and scale is recommended
+              tuneGrid = knn.grid, # tuning parameter: more is better
+              metric = "ROC",
+              trControl = ctrl)
+
+```
+
+```{r fitting RF model}
+
+## set seed for reproducibility
+set.seed(1)
+
+## manually define tuning parameter grid
+rf.grid <- expand.grid(mtry = 1:6,
+                       splitrule = "gini",
+                       min.node.size = 1:6)
+
+## fit RF model
+mod7 <- train(x = x.train,
+              y = y.train,
+              method = "ranger",
+              tuneGrid = rf.grid,
+              metric = "ROC",
+              trControl = ctrl)
+
+```
+
+## Model Evaluation
+
+In order to compare all of our models, we must each model's predictions on the test set, and then calculate the relevant evaluation metrics (here, we are most interested in the AUC and confusion matrices, but we have also included various evaluation indices and calibration curves).
+
+### Predictions
+
+First, let's get our predictions from each model using the test set. 
+
+```{r test set predictions, warning = FALSE}
+
+pred1 <- predict(mod1, newdata = test, type = 'response')
+pred2 <- predict(mod2, newdata = test, type = 'response')
+pred3 <- predict(mod3, newdata = test, type = 'response')
+pred4 <- predict(mod4, newdata = test, type = 'response')
+pred5 <- predict(mod5, newdata = test, type = 'response')
+pred6 <- predict(mod6, newdata = test, type = "prob")[,2]
+pred7 <- predict(mod7, newdata = test, type = "prob")[,2]
+
+```
+
+### Test Set AUC
+
+Next, calculate and plot AUC for each model.
+
+```{r test set auc, message = FALSE}
+
+auc1 <- auc(test$TenYearCHD, pred1)
+auc2 <- auc(test$TenYearCHD, pred2)
+auc3 <- auc(test$TenYearCHD, pred3)
+auc4 <- auc(test$TenYearCHD, pred4)
+auc5 <- auc(test$TenYearCHD, pred5)
+auc6 <- auc(y.test, pred6)
+auc7 <- auc(y.test, pred7)
+
+auc_df <- data.frame(model = c("mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "mod7"), 
+                     auc = c(auc1, auc2, auc3, auc4, auc5, auc6, auc7))
+
+auc_df %>% 
+  ggplot(aes(x = as.factor(model), y = auc)) + 
+  geom_point() + 
+  geom_text(aes(label = as.character(round(auc, 4))), hjust = -0.25, vjust = 1.5) + 
+  xlab("Model") + 
+  ylab("AUC") + 
+  ggtitle("Test set AUC for each Model") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+### Test Set Confusion Matrices (and other evaluation indices)
+
+First, we will define a function which takes the confusion matrix as input and outputs a series of evaluation indices. 
+
+```{r function for calculating evaluation metrics}
+
+#error metrics -- Confusion Matrix Function
+err_metric=function(CM)
+{
+  TN =CM[1,1]
+  TP =CM[2,2]
+  FP =CM[1,2]
+  FN =CM[2,1]
+  precision =(TP)/(TP+FP)
+  recall_score =(FP)/(FP+TN)
+  f1_score=2*((precision*recall_score)/(precision+recall_score))
+  accuracy_model  =(TP+TN)/(TP+TN+FP+FN)
+  False_positive_rate =(FP)/(FP+TN) # Recall Score
+  False_negative_rate =(FN)/(FN+TP)
+  Sensitivity = (TP)/(TP+FN)
+  Specificity = (TN)/(TN+FP)
+  MCC = (TP*TN-FP*FN) / sqrt(((TP+FN)*(TP+FN)*(TN+FP)*(TN+FN)))
+  print(paste("Sensitivity:    ",round(Sensitivity,2)))
+  print(paste("Specificity:    ",round(Specificity,2)))
+  print(paste("Precision:      ",round(precision,2))) # Calculation of the true positives out of all positive rated cases
+  print(paste("Accuracy:       ",round(accuracy_model,2)))
+  print(paste("Recall:         ",round(recall_score,2)))
+  print(paste("False Positive: ",round(False_positive_rate,2))) # Same as recall
+  print(paste("False Negative: ",round(False_negative_rate,2)))
+  print(paste("F1 score:       ",round(f1_score,2))) # Closer to 1, the better the model.
+  print(paste("MCC score:      ",round(MCC,2))) # Between -1 and 1, the better the classifier; 0 = very random; 1 = Perfect classifier.
+
+}
+
+```
+
+Confusion Matrix Mod1 - Mod5
+```{r}
+
+test$PredDir <- ifelse(pred1 > 0.5, 1, 0)
+CM.1 = table(test$PredDir, test$TenYearCHD)
+print(CM.1)
+err_metric(CM.1)
+
+test$PredDir <- ifelse(pred2 > 0.5, 1, 0)
+CM.2 = table(test$PredDir, test$TenYearCHD)
+print(CM.2)
+err_metric(CM.2)
+
+test$PredDir <- ifelse(pred3 > 0.5, 1, 0)
+CM.3 = table(test$PredDir, test$TenYearCHD)
+print(CM.3)
+err_metric(CM.3)
+
+test$PredDir <- ifelse(pred4 > 0.5, 1, 0)
+CM.4 = table(test$PredDir, test$TenYearCHD)
+print(CM.4)
+err_metric(CM.4)
+
+test$PredDir <- ifelse(pred5 > 0.5, 1, 0)
+CM.5 = table(test$PredDir, test$TenYearCHD)
+print(CM.5)
+err_metric(CM.5)
+
+yhat.KNN <- predict(mod6, newdata=test)
+CM.6 = table(yhat.KNN, y.test)
+print(CM.6)
+err_metric(CM.6)
+
+
+yhat.RF <- predict(mod6, newdata=test)
+CM.7 = table(yhat.RF, y.test)
+print(CM.7)
+err_metric(CM.7)
+```
+
+ROC Curves
+```{r}
+#ROC curve Scores
+roc_score.1 = roc(test[,16], pred1) #AUC score
+roc_score.2 = roc(test[,16], pred2) #AUC score
+roc_score.3 = roc(test[,16], pred3) #AUC score
+roc_score.4 = roc(test[,16], pred4) #AUC score
+roc_score.5 = roc(test[,16], pred5) #AUC score
+roc_score.6 = roc(test[,16], pred6) #AUC score
+roc_score.6 = roc(y.test, pred6) #AUC score
+roc_score.7 = roc(y.test, pred7) #AUC score
+
+# ROC Plots
+plot(roc_score.1, main ="ROC curve -- Logistic Regression Model 1")
+plot(roc_score.2, main ="ROC curve -- Logistic Regression Model 2")
+plot(roc_score.3, main ="ROC curve -- Logistic Regression Model 3")
+plot(roc_score.4, main ="ROC curve -- Logistic Regression Model 4")
+plot(roc_score.5, main ="ROC curve -- Logistic Regression Model 5")
+plot(roc_score.6, main ="ROC curve -- KNN Model 6")
+plot(roc_score.7, main ="ROC curve -- Random Forest Model 7")
+
+```
+
+Discrimination is an important step in model selection so determining the accuracy of the risk estimates is imperative. Calibration calculates the agreement of estimated and observed number of events.
+
+Assessing the calibration of the logistic models.
+```{r}
+levels(train$TenYearCHD) <- c("0", "1")
+levels(test$TenYearCHD) <- c("0", "1")
+
+# Calibration usually requires at least 200 observations in observed and unobserved events. That would require us to sample at 60% train and 40% test. 
+
+#remotes::install_github('ML4LHS/runway') # required package for calibration plots
+library(runway)
+
+
+# creating columns of predicted values in the test data
+test$pred1 <- as.numeric(predict(mod1, newdata = test, type = 'response'))
+test$pred1.bin <- ifelse(test$pred1 >= 0.2, 1, 0)
+test$pred2 <-  as.numeric(predict(mod2, newdata = test, type = 'response'))
+test$pred2.bin <- ifelse(test$pred2>= 0.2, 1, 0)
+test$pred3 <-  as.numeric(predict(mod3, newdata = test, type = 'response'))
+test$pred3.bin <- ifelse(test$pred3 >= 0.2, 1, 0)
+test$pred4 <-  as.numeric(predict(mod4, newdata = test, type = 'response'))
+test$pred4.bin <- ifelse(test$pred4 >= 0.2, 1, 0)
+test$pred5 <-  as.numeric(predict(mod5, newdata = test, type = 'response'))
+test$pred5.bin <- ifelse(test$pred5 >= 0.2, 1, 0)
+
+# Taking the testing predictions and converting it to long data
+test_long <-  test %>% mutate(ID = row_number()) %>% dplyr::select(ID,TenYearCHD, pred1, pred2, pred3, pred4, pred5) %>%
+  tidyr::pivot_longer(cols = starts_with("pred"), names_to = "model", values_to = "predictions")
+
+# threshold plot of all the logistic models
+threshperf_plot_multi(test_long,
+                      outcome = 'TenYearCHD',
+                      prediction = 'predictions',
+                      model = 'model',
+         plot_title = "Threshold Plot of Logistic Models")
+cal_plot_multi(test_long,
+                      outcome = 'TenYearCHD',
+                      prediction = 'predictions',
+                      model = 'model',
+                      show_loess = FALSE,
+               n_bins=,
+         plot_title = "Cailbration Plot of Model 2")
+# at 40% testing (CHD n = 231), the models are well calibrated. However, at 20%, the models are overestimating.
+
+# individual calibration plots (comments are at 40% test data)
+
+# model 1
+# threshold
+threshperf_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred1',
+         plot_title = "Threshold Performance of Model 1")
+# calibrate
+cal_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred1',
+         plot_title = "Calibration of Model 1")
+# Slightly underestimating
+# model 2
+# threshold
+threshperf_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred2',
+         plot_title = "Threshold Performance of Model 2")
+# calibrate
+cal_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred2',
+         plot_title = "Cailbration Plot of Model 2")
+# Slight underestimating but could argue it is well calibrated
+# model 3
+# threshold
+threshperf_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred3',
+         plot_title = "Threshold Performance of Model 3")
+# calibrate
+cal_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred3',
+         plot_title = "Cailbration Plot of Model 3")
+# Underestimating again. Could be over fit. 
+# model 4
+# threshold
+threshperf_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred4',
+         plot_title = "Threshold Performance of Model 4")
+# calibrate
+cal_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred4',
+         plot_title = "Cailbration Plot of Model 4")
+# Looks pretty good
+# model 5
+# threshold
+threshperf_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred5',
+         plot_title = "Threshold Performance of Model 5")
+# calibrate
+cal_plot(test,
+         outcome = 'TenYearCHD', 
+         prediction = 'pred5',
+         plot_title = "Cailbration Plot of Model 5")
+# Underestimating 
+
+# creating confusion matrix
+p1<- confusionMatrix(data=as.factor(test$pred1.bin), reference = test$TenYearCHD )
+p2<- confusionMatrix(data=as.factor(test$pred2.bin), reference = test$TenYearCHD )
+p3<- confusionMatrix(data=as.factor(test$pred3.bin), reference = test$TenYearCHD )
+p4<-confusionMatrix(data=as.factor(test$pred4.bin), reference = test$TenYearCHD )
+p5 <- confusionMatrix(data=as.factor(test$pred5.bin), reference = test$TenYearCHD )
+
+```
+
+## Conclusions - Best Model Summary
+
+Of all the models, mod2 performed best on out of sample data. Model 2 was the logistic regression model containing only the significant features (as determined by mod1, which consisted of all additive inputs).
+
+```{r mod2 summary}
+
+summary(mod2)
+
+```
+
+As we can see, sex, age, cigarette count per day, total cholesterol, systolic blood pressure, and glucose levels are all important in prediction 10-year CHD risk. 
+
+## Limitations / Future Directions
+
+Models
+- instead of diving deep into one model class (ex: KNN tuning), we decided to fit a bunch of models using many different techniques. 
+- could have tried different combinations of inputs, different methods in order to try and get best predictions
+- instead, only went in-depth for logistic regression, and treated KNN and RF as supplementary approaches
+
+Evaluation
+- only performed a single train/test split for the logistic regression models
